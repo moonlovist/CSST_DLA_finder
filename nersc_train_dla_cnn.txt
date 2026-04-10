@@ -1,0 +1,73 @@
+1. 进入 GPU interactive node
+
+qinteractive -C gpu -q interactive -t 04:00:00 -A <your_account>
+
+2. 加载环境
+
+module load python
+conda activate /global/cfs/cdirs/desi/users/tingtan/conda_envs/CSST_simqso
+
+3. 如果这个环境里还没有 PyTorch，则安装到用户目录或新环境
+
+python -m pip install --user torch torchvision torchaudio
+
+4. 训练 CNN 基线
+
+cd /global/cfs/cdirs/desi/users/tingtan/CSST_forecast/DLA_forecast/CSST_DLA_finder
+
+python train_dla_cnn.py \
+  --train_fits /global/cfs/cdirs/desi/users/tingtan/CSST_forecast/DLA_forecast/DLA_spectra/train.fits.gz \
+  --output_dir /global/cfs/cdirs/desi/users/tingtan/CSST_forecast/DLA_forecast/cnn_runs/run01 \
+  --epochs 30 \
+  --batch_size 128 \
+  --lr 1e-3 \
+  --num_workers 4 \
+  --amp
+
+5. 在盲测试集上做调试推理
+
+python predict_dla_cnn.py \
+  --test_fits /global/cfs/cdirs/desi/users/tingtan/CSST_forecast/DLA_forecast/DLA_spectra/test.fits.gz \
+  --checkpoint /global/cfs/cdirs/desi/users/tingtan/CSST_forecast/DLA_forecast/cnn_runs/run01/best_model.pt \
+  --output_csv /global/cfs/cdirs/desi/users/tingtan/CSST_forecast/DLA_forecast/cnn_runs/run01/test_predictions.csv \
+  --batch_size 256
+
+6. 生成正式提交 FITS
+
+python build_submission_fits.py \
+  --test_fits /global/cfs/cdirs/desi/users/tingtan/CSST_forecast/DLA_forecast/DLA_spectra/test.fits.gz \
+  --checkpoint /global/cfs/cdirs/desi/users/tingtan/CSST_forecast/DLA_forecast/cnn_runs/run01/best_model.pt \
+  --output_fits /global/cfs/cdirs/desi/users/tingtan/CSST_forecast/DLA_forecast/cnn_runs/run01/team_submission.fits \
+  --batch_size 256 \
+  --confidence_threshold 0.5 \
+  --min_log_nhi 20.3
+
+7. 输出文件说明
+
+best_model.pt
+保存模型参数、辅助特征归一化统计量和验证集指标。
+
+history.json
+保存每个 epoch 的训练/验证指标。
+
+summary.json
+保存最佳 F1 和样本数摘要。
+
+test_predictions.csv
+每条测试光谱一行，包含：
+spec_id, targetid, z_qso, prob_has_dla, pred_n_dla, pred_z_dla1, pred_lognhi1, pred_z_dla2, pred_lognhi2
+
+team_submission.fits
+复制测试集 FITS 并追加官方要求的 RESULTS 扩展。
+
+8. 这个基线做了什么
+
+输入：
+FLUX 作为 1D 光谱输入，LABELS 里的 Z_QSO、SNR_GU、SNR_GV、SNR_GI 作为辅助特征。
+
+输出：
+同时预测 HAS_DLA、N_DLA、以及两个 DLA 的 z 和 logNHI。
+
+说明：
+这是一个可直接训练的 baseline。若最终比赛任务只要求判别是否存在 DLA，可直接使用 prob_has_dla。
+若最终任务要求定位 DLA 红移和柱密度，则可用这套多任务输出继续迭代。
