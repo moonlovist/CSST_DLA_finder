@@ -11,7 +11,14 @@ from astropy.io import fits
 from astropy.table import Table
 from torch.utils.data import DataLoader
 
-from dla_cnn import DlaCnnModel, DlaSpectraDataset, NormalizationStats, load_fits_dataset
+from dla_cnn import (
+    DlaCnnModel,
+    DlaSpectraDataset,
+    NormalizationStats,
+    decode_count_predictions,
+    denormalize_dla_params,
+    load_fits_dataset,
+)
 from predict_dla_cnn import pick_device, postprocess_params
 
 
@@ -25,6 +32,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--device", type=str, default="auto")
     p.add_argument("--confidence_threshold", type=float, default=0.5)
     p.add_argument("--min_log_nhi", type=float, default=20.3)
+    p.add_argument("--has_dla_threshold", type=float, default=0.4)
+    p.add_argument("--two_dla_threshold", type=float, default=0.5)
     return p.parse_args()
 
 
@@ -65,8 +74,12 @@ def main() -> None:
             aux = batch["aux"].to(device, non_blocking=True)
             outputs = model(flux, aux)
             probs = torch.sigmoid(outputs["has_dla_logit"]).cpu().numpy()
-            counts = outputs["count_logit"].argmax(dim=1).cpu().numpy()
-            params = outputs["params"].cpu().numpy()
+            two_probs = torch.sigmoid(outputs["two_dla_logit"]).cpu().numpy()
+            counts = decode_count_predictions(
+                probs, two_probs, args.has_dla_threshold, args.two_dla_threshold
+            )
+            z_qso_batch = batch["z_qso"].cpu().numpy()
+            params = denormalize_dla_params(outputs["params_norm"].cpu().numpy(), z_qso_batch)
 
             for j in range(probs.shape[0]):
                 spec_id = start * args.batch_size + j
@@ -79,7 +92,7 @@ def main() -> None:
                     continue
 
                 targetid = int(data["targetid"][spec_id])
-                z_qso = float(data["z_qso"][spec_id])
+                z_qso = float(z_qso_batch[j])
                 z1, logn1, z2, logn2 = postprocess_params(params[j], z_qso, pred_n_dla)
 
                 rows = []

@@ -10,7 +10,14 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
-from dla_cnn import DlaCnnModel, DlaSpectraDataset, NormalizationStats, load_fits_dataset
+from dla_cnn import (
+    DlaCnnModel,
+    DlaSpectraDataset,
+    NormalizationStats,
+    decode_count_predictions,
+    denormalize_dla_params,
+    load_fits_dataset,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -21,6 +28,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--batch_size", type=int, default=128)
     p.add_argument("--num_workers", type=int, default=4)
     p.add_argument("--device", type=str, default="auto")
+    p.add_argument("--has_dla_threshold", type=float, default=0.4)
+    p.add_argument("--two_dla_threshold", type=float, default=0.5)
     return p.parse_args()
 
 
@@ -84,20 +93,25 @@ def main() -> None:
             aux = batch["aux"].to(device, non_blocking=True)
             outputs = model(flux, aux)
             probs = torch.sigmoid(outputs["has_dla_logit"]).cpu().numpy()
-            count = outputs["count_logit"].argmax(dim=1).cpu().numpy()
-            params = outputs["params"].cpu().numpy()
+            two_probs = torch.sigmoid(outputs["two_dla_logit"]).cpu().numpy()
+            count = decode_count_predictions(
+                probs, two_probs, args.has_dla_threshold, args.two_dla_threshold
+            )
+            z_qso_batch = batch["z_qso"].cpu().numpy()
+            params = denormalize_dla_params(outputs["params_norm"].cpu().numpy(), z_qso_batch)
 
             for j in range(probs.shape[0]):
                 spec_id = start * args.batch_size + j
                 pred_n_dla = int(count[j])
                 target_id = int(data.get("targetid", np.arange(len(indices)))[spec_id])
-                z_qso = float(data.get("z_qso", data["aux"][:, 0])[spec_id])
+                z_qso = float(z_qso_batch[j])
                 z1, logn1, z2, logn2 = postprocess_params(params[j], z_qso, pred_n_dla)
                 rows.append([
                     spec_id,
                     target_id,
                     z_qso,
                     float(probs[j]),
+                    float(two_probs[j]),
                     pred_n_dla,
                     z1,
                     logn1,
@@ -112,6 +126,7 @@ def main() -> None:
             "targetid",
             "z_qso",
             "prob_has_dla",
+            "prob_two_dla_given_dla",
             "pred_n_dla",
             "pred_z_dla1",
             "pred_lognhi1",

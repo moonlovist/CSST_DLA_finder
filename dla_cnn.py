@@ -15,6 +15,9 @@ from torch.utils.data import Dataset
 
 
 EPS = 1e-6
+Z_MIN = 1.6
+LOGNHI_MIN = 19.5
+LOGNHI_MAX = 22.5
 
 
 def estimate_band_snrs(wave: np.ndarray, flux: np.ndarray) -> np.ndarray:
@@ -132,6 +135,25 @@ def compute_flux_scale(flux: np.ndarray) -> np.ndarray:
     return scale
 
 
+def normalize_dla_params(z: np.ndarray, logn: np.ndarray, z_qso: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    z_max = np.maximum(z_qso - 0.05, Z_MIN + 1e-3)
+    z_norm = (z - Z_MIN) / np.maximum(z_max - Z_MIN, 1e-3)
+    logn_norm = (logn - LOGNHI_MIN) / (LOGNHI_MAX - LOGNHI_MIN)
+    return z_norm.astype(np.float32), logn_norm.astype(np.float32)
+
+
+def denormalize_dla_params(params: np.ndarray, z_qso: np.ndarray) -> np.ndarray:
+    params = np.clip(params, 0.0, 1.0)
+    z_max = np.maximum(z_qso - 0.05, Z_MIN + 1e-3)
+    z_scale = np.maximum(z_max - Z_MIN, 1e-3)
+    out = np.empty_like(params, dtype=np.float32)
+    out[:, 0] = Z_MIN + params[:, 0] * z_scale
+    out[:, 1] = LOGNHI_MIN + params[:, 1] * (LOGNHI_MAX - LOGNHI_MIN)
+    out[:, 2] = Z_MIN + params[:, 2] * z_scale
+    out[:, 3] = LOGNHI_MIN + params[:, 3] * (LOGNHI_MAX - LOGNHI_MIN)
+    return out
+
+
 @dataclass
 class NormalizationStats:
     aux_mean: np.ndarray
@@ -170,6 +192,7 @@ class DlaSpectraDataset(Dataset):
         if training:
             self.has_dla = data["has_dla"][indices].astype(np.float32)
             self.n_dla = data["n_dla"][indices].astype(np.int64)
+            self.two_dla = (self.n_dla == 2).astype(np.float32)
             self.z1 = data["z1"][indices].astype(np.float32)
             self.logn1 = data["logn1"][indices].astype(np.float32)
             self.z2 = data["z2"][indices].astype(np.float32)
@@ -183,19 +206,26 @@ class DlaSpectraDataset(Dataset):
         flux = np.clip(flux, -5.0, 5.0).astype(np.float32)
         flux = flux[None, :]
         aux = self.aux_norm[idx]
+        z_qso = np.float32(self.aux[idx, 0])
 
         if not self.training:
             return {
                 "flux": torch.from_numpy(flux),
                 "aux": torch.from_numpy(aux),
+                "z_qso": torch.tensor(z_qso, dtype=torch.float32),
             }
 
-        target = np.array([
-            np.nan_to_num(self.z1[idx], nan=0.0),
-            np.nan_to_num(self.logn1[idx], nan=0.0),
-            np.nan_to_num(self.z2[idx], nan=0.0),
-            np.nan_to_num(self.logn2[idx], nan=0.0),
-        ], dtype=np.float32)
+        z_qso = float(self.aux[idx, 0])
+        z1 = np.nan_to_num(self.z1[idx], nan=Z_MIN)
+        z2 = np.nan_to_num(self.z2[idx], nan=Z_MIN)
+        n1 = np.nan_to_num(self.logn1[idx], nan=LOGNHI_MIN)
+        n2 = np.nan_to_num(self.logn2[idx], nan=LOGNHI_MIN)
+        z_norm, logn_norm = normalize_dla_params(
+            np.array([z1, z2], dtype=np.float32),
+            np.array([n1, n2], dtype=np.float32),
+            np.array([z_qso, z_qso], dtype=np.float32),
+        )
+        target = np.array([z_norm[0], logn_norm[0], z_norm[1], logn_norm[1]], dtype=np.float32)
         mask = np.array([
             float(np.isfinite(self.z1[idx])),
             float(np.isfinite(self.logn1[idx])),
@@ -208,8 +238,10 @@ class DlaSpectraDataset(Dataset):
             "aux": torch.from_numpy(aux),
             "has_dla": torch.tensor(self.has_dla[idx], dtype=torch.float32),
             "n_dla": torch.tensor(self.n_dla[idx], dtype=torch.long),
+            "two_dla": torch.tensor(self.two_dla[idx], dtype=torch.float32),
             "target": torch.from_numpy(target),
             "mask": torch.from_numpy(mask),
+            "z_qso": torch.tensor(z_qso, dtype=torch.float32),
         }
 
 
@@ -263,7 +295,7 @@ class DlaCnnModel(nn.Module):
             nn.Dropout(0.2),
         )
         self.has_dla_head = nn.Linear(hidden_dim, 1)
-        self.count_head = nn.Linear(hidden_dim, 3)
+        self.two_dla_head = nn.Linear(hidden_dim, 1)
         self.param_head = nn.Linear(hidden_dim, 4)
 
     def forward(self, flux: torch.Tensor, aux: torch.Tensor) -> Dict[str, torch.Tensor]:
@@ -274,37 +306,83 @@ class DlaCnnModel(nn.Module):
         feat = self.head(torch.cat([x, aux_feat], dim=1))
         return {
             "has_dla_logit": self.has_dla_head(feat).squeeze(1),
-            "count_logit": self.count_head(feat),
-            "params": self.param_head(feat),
+            "two_dla_logit": self.two_dla_head(feat).squeeze(1),
+            "params_norm": torch.sigmoid(self.param_head(feat)),
         }
+
+
+def focal_bce_with_logits(logits: torch.Tensor,
+                          targets: torch.Tensor,
+                          alpha: float = 0.25,
+                          gamma: float = 2.0,
+                          pos_weight: Optional[torch.Tensor] = None) -> torch.Tensor:
+    bce = nn.functional.binary_cross_entropy_with_logits(
+        logits, targets, reduction="none", pos_weight=pos_weight
+    )
+    probs = torch.sigmoid(logits)
+    p_t = probs * targets + (1.0 - probs) * (1.0 - targets)
+    alpha_t = alpha * targets + (1.0 - alpha) * (1.0 - targets)
+    modulating = (1.0 - p_t).pow(gamma)
+    return (alpha_t * modulating * bce).mean()
 
 
 def compute_losses(outputs: Dict[str, torch.Tensor],
                    batch: Dict[str, torch.Tensor],
-                   weights: Optional[Dict[str, float]] = None) -> Dict[str, torch.Tensor]:
-    if weights is None:
-        weights = {
+                   loss_config: Optional[Dict[str, float]] = None) -> Dict[str, torch.Tensor]:
+    if loss_config is None:
+        loss_config = {
             "has_dla": 1.0,
-            "count": 0.5,
-            "params": 1.0,
+            "two_dla": 0.35,
+            "params": 0.8,
+            "pos_weight": 1.0,
+            "focal_alpha": 0.35,
+            "focal_gamma": 2.0,
         }
 
-    bce = nn.functional.binary_cross_entropy_with_logits(
-        outputs["has_dla_logit"], batch["has_dla"]
+    pos_weight = torch.tensor(
+        [loss_config["pos_weight"]],
+        device=outputs["has_dla_logit"].device,
+        dtype=outputs["has_dla_logit"].dtype,
     )
-    ce = nn.functional.cross_entropy(outputs["count_logit"], batch["n_dla"])
+    has_dla_loss = focal_bce_with_logits(
+        outputs["has_dla_logit"],
+        batch["has_dla"],
+        alpha=loss_config["focal_alpha"],
+        gamma=loss_config["focal_gamma"],
+        pos_weight=pos_weight,
+    )
+    two_raw = nn.functional.binary_cross_entropy_with_logits(
+        outputs["two_dla_logit"], batch["two_dla"], reduction="none"
+    )
+    two_mask = batch["has_dla"]
+    two_dla_loss = (two_raw * two_mask).sum() / two_mask.sum().clamp_min(1.0)
     raw_reg = nn.functional.smooth_l1_loss(
-        outputs["params"], batch["target"], reduction="none"
+        outputs["params_norm"], batch["target"], reduction="none"
     )
     mask = batch["mask"]
     reg = (raw_reg * mask).sum() / mask.sum().clamp_min(1.0)
-    total = weights["has_dla"] * bce + weights["count"] * ce + weights["params"] * reg
+    total = (
+        loss_config["has_dla"] * has_dla_loss
+        + loss_config["two_dla"] * two_dla_loss
+        + loss_config["params"] * reg
+    )
     return {
         "loss": total,
-        "bce": bce.detach(),
-        "ce": ce.detach(),
+        "bce": has_dla_loss.detach(),
+        "ce": two_dla_loss.detach(),
         "reg": reg.detach(),
     }
+
+
+def decode_count_predictions(has_probs: np.ndarray,
+                             two_probs: np.ndarray,
+                             threshold_has: float = 0.5,
+                             threshold_two: float = 0.5) -> np.ndarray:
+    counts = np.zeros_like(has_probs, dtype=np.int64)
+    pos = has_probs >= threshold_has
+    counts[pos] = 1
+    counts[pos & (two_probs >= threshold_two)] = 2
+    return counts
 
 
 def classification_metrics(probs: np.ndarray, targets: np.ndarray) -> Dict[str, float]:
