@@ -25,6 +25,7 @@ def parse_args():
     p.add_argument("--confidence_threshold", type=float, default=0.3)
     p.add_argument("--top_k", type=int, default=8)
     p.add_argument("--min_log_nhi", type=float, default=20.3)
+    p.add_argument("--batch_size", type=int, default=512)
     return p.parse_args()
 
 
@@ -45,7 +46,7 @@ def main():
     for i in range(len(data["flux"])):
         cands = infer_spectrum(
             model, data["wave"], data["flux"][i], float(data["z_qso"][i]), device,
-            args.window_size, args.stride, args.confidence_threshold, args.top_k,
+            args.window_size, args.stride, args.confidence_threshold, args.top_k, args.batch_size,
         )
         for cand in cands:
             if cand["log_nhi"] < args.min_log_nhi:

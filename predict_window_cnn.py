@@ -30,6 +30,7 @@ def parse_args():
     p.add_argument("--window_size", type=int, default=256)
     p.add_argument("--confidence_threshold", type=float, default=0.3)
     p.add_argument("--top_k", type=int, default=8)
+    p.add_argument("--batch_size", type=int, default=512)
     return p.parse_args()
 
 
@@ -39,32 +40,40 @@ def pick_device(name: str):
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-def infer_spectrum(model, wave, flux, z_qso, device, window_size, stride, threshold, top_k):
+def infer_spectrum(model, wave, flux, z_qso, device, window_size, stride, threshold, top_k, batch_size):
     half = window_size // 2
     candidates = []
     model.eval()
+    centers = list(range(half, len(wave) - half, stride))
     with torch.no_grad():
-        for center in range(half, len(wave) - half, stride):
-            window = extract_window(flux, center, window_size)[None, None, :]
-            aux = np.array([[wave[center] / 8000.0, z_qso / 4.0]], dtype=np.float32)
-            outputs = model(torch.from_numpy(window).to(device), torch.from_numpy(aux).to(device))
-            conf = float(torch.sigmoid(outputs["logit"])[0].cpu().item())
-            if conf < threshold:
-                continue
-            offset = float(outputs["offset"][0].cpu().item())
-            refined_center = center + offset * 6.0
-            refined_center = float(np.clip(refined_center, 0, len(wave) - 1))
-            lam = np.interp(refined_center, np.arange(len(wave), dtype=np.float32), wave)
-            z_dla = lam / LYA_REST - 1.0
-            logn = LOGNHI_MIN + float(outputs["logn_norm"][0].cpu().item()) * (LOGNHI_MAX - LOGNHI_MIN)
-            if z_dla >= z_qso - 0.05 or z_dla < 1.6:
-                continue
-            candidates.append({
-                "center_pix": refined_center,
-                "z_dla": z_dla,
-                "log_nhi": logn,
-                "confidence": conf,
-            })
+        for i in range(0, len(centers), batch_size):
+            batch_centers = centers[i:i + batch_size]
+            windows = np.stack([extract_window(flux, c, window_size) for c in batch_centers], axis=0)[:, None, :]
+            aux = np.stack(
+                [np.array([wave[c] / 8000.0, z_qso / 4.0], dtype=np.float32) for c in batch_centers],
+                axis=0,
+            )
+            outputs = model(torch.from_numpy(windows).to(device), torch.from_numpy(aux).to(device))
+            confs = torch.sigmoid(outputs["logit"]).cpu().numpy()
+            offsets = outputs["offset"].cpu().numpy()
+            logns = outputs["logn_norm"].cpu().numpy()
+            for center, conf, offset, logn_norm in zip(batch_centers, confs, offsets, logns):
+                conf = float(conf)
+                if conf < threshold:
+                    continue
+                refined_center = center + float(offset) * 6.0
+                refined_center = float(np.clip(refined_center, 0, len(wave) - 1))
+                lam = np.interp(refined_center, np.arange(len(wave), dtype=np.float32), wave)
+                z_dla = lam / LYA_REST - 1.0
+                logn = LOGNHI_MIN + float(logn_norm) * (LOGNHI_MAX - LOGNHI_MIN)
+                if z_dla >= z_qso - 0.05 or z_dla < 1.6:
+                    continue
+                candidates.append({
+                    "center_pix": refined_center,
+                    "z_dla": z_dla,
+                    "log_nhi": logn,
+                    "confidence": conf,
+                })
     merged = merge_candidates(candidates)
     merged = sorted(merged, key=lambda x: x["confidence"], reverse=True)[:top_k]
     merged.sort(key=lambda x: x["z_dla"])
@@ -82,7 +91,7 @@ def main():
     for i in range(len(data["flux"])):
         cands = infer_spectrum(
             model, data["wave"], data["flux"][i], float(data["z_qso"][i]), device,
-            args.window_size, args.stride, args.confidence_threshold, args.top_k,
+            args.window_size, args.stride, args.confidence_threshold, args.top_k, args.batch_size,
         )
         if not cands:
             rows.append([i, int(data["targetid"][i]), float(data["z_qso"][i]), "", "", ""])

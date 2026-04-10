@@ -11,6 +11,7 @@ MIN_LOG_NHI="${MIN_LOG_NHI:-20.3}"
 STRIDE="${STRIDE:-8}"
 WINDOW_SIZE="${WINDOW_SIZE:-256}"
 TOP_K="${TOP_K:-8}"
+BATCH_SIZE="${BATCH_SIZE:-512}"
 
 mkdir -p "$(dirname "${OUTPUT_FITS}")"
 
@@ -21,5 +22,6 @@ python build_submission_window_cnn.py \
   --stride "${STRIDE}" \
   --window_size "${WINDOW_SIZE}" \
   --top_k "${TOP_K}" \
+  --batch_size "${BATCH_SIZE}" \
   --confidence_threshold "${CONFIDENCE_THRESHOLD}" \
   --min_log_nhi "${MIN_LOG_NHI}"
