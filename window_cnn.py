@@ -42,12 +42,25 @@ def load_test_arrays(path: str) -> Dict[str, np.ndarray]:
     with fits.open(path, memmap=False) as hdul:
         wave = np.asarray(hdul["WAVELENGTH"].data, dtype=np.float32)
         flux = np.asarray(hdul["FLUX"].data, dtype=np.float32)
-        meta = hdul["META"].data
+        if "META" in hdul:
+            meta = hdul["META"].data
+            z_qso = np.asarray(meta["Z_QSO"], dtype=np.float32)
+            targetid = np.asarray(meta["TARGETID"], dtype=np.int64)
+        elif "LABELS" in hdul:
+            # Backward compatibility for older blind-test files produced before META was added.
+            meta = hdul["LABELS"].data
+            z_qso = np.asarray(meta["Z_QSO"], dtype=np.float32)
+            if "TARGETID" in meta.names:
+                targetid = np.asarray(meta["TARGETID"], dtype=np.int64)
+            else:
+                targetid = np.arange(flux.shape[0], dtype=np.int64)
+        else:
+            raise KeyError("Neither META nor LABELS extension found in test FITS.")
         data = {
             "wave": wave,
             "flux": flux,
-            "z_qso": np.asarray(meta["Z_QSO"], dtype=np.float32),
-            "targetid": np.asarray(meta["TARGETID"], dtype=np.int64),
+            "z_qso": z_qso,
+            "targetid": targetid,
         }
     return data
 
