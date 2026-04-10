@@ -4,6 +4,8 @@ Baseline code package for the CSST DLA Finder Challenge.
 
 This folder is structured so it can be pushed to GitHub and cloned on NERSC, then run directly on a GPU interactive node.
 
+The current `main` baseline is a DESI-style window CNN. The previous full-spectrum global CNN is preserved in branch `legacy-global-cnn`.
+
 ## What Is Included
 
 - `generate_train_fits.py`
@@ -12,12 +14,20 @@ This folder is structured so it can be pushed to GitHub and cloned on NERSC, the
   Generate the blind test FITS file with `META(TARGETID, Z_QSO)`.
 - `dla_cnn.py`
   Shared data loading, preprocessing, and the 1D CNN model.
+- `window_cnn.py`
+  Shared data loading and DESI-style sliding-window CNN utilities.
 - `train_dla_cnn.py`
   Train the CNN baseline.
+- `train_window_cnn.py`
+  Train the current window-based baseline.
 - `predict_dla_cnn.py`
   Write a debugging CSV for blind-test predictions.
+- `predict_window_cnn.py`
+  Run sliding-window inference and write debugging candidates.
 - `build_submission_fits.py`
   Build the official submission FITS by appending a `RESULTS` extension.
+- `build_submission_window_cnn.py`
+  Build the official submission FITS from the window CNN.
 - `validate_csst_dla_files.py`
   Validate train, test, and submission FITS files against the challenge schema.
 - `run_train.sh`
@@ -77,6 +87,17 @@ data/
 runs/
 submissions/
 ```
+
+## Baseline Choice
+
+`main`:
+- window-based CNN inspired by the DESI DLA finder setup
+- local-window classification and parameter regression
+- better matched to localized DLA damping-wing structure
+
+`legacy-global-cnn`:
+- previous whole-spectrum baseline
+- kept only for reference
 
 ## Quick Start On NERSC
 

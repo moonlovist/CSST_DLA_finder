@@ -8,7 +8,7 @@ BATCH_SIZE="${BATCH_SIZE:-128}"
 NUM_WORKERS="${NUM_WORKERS:-4}"
 LR="${LR:-1e-3}"
 
-python train_dla_cnn.py \
+python train_window_cnn.py \
   --train_fits "${TRAIN_FITS}" \
   --output_dir "${OUTPUT_DIR}" \
   --epochs "${EPOCHS}" \
