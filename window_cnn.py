@@ -168,6 +168,74 @@ def build_window_samples(data: Dict[str, np.ndarray],
     return samples
 
 
+def build_sliding_window_samples(data: Dict[str, np.ndarray],
+                                 indices: Sequence[int],
+                                 window_size: int,
+                                 stride: int = 16,
+                                 positive_radius_pix: int = 16,
+                                 min_positive_log_nhi: float = 20.3,
+                                 max_neg_per_spec: int = 32,
+                                 hard_negative_radius_pix: int = 96,
+                                 seed: int = 20251031) -> List[WindowSample]:
+    """Build training windows from the same grid used at inference time.
+
+    This reduces the train/inference mismatch from random window sampling. Anchors near
+    true DLAs above the challenge threshold are positive; anchors near sub-DLAs or just
+    outside positive regions are retained preferentially as hard negatives.
+    """
+    wave = data["wave"]
+    rng = np.random.default_rng(seed)
+    half = window_size // 2
+    low = half
+    high = len(wave) - half - 1
+    grid_centers = np.arange(low, high + 1, stride, dtype=np.int64)
+    samples: List[WindowSample] = []
+
+    for spec_idx in indices:
+        absorber_centers = []
+        positive_centers = []
+        for z, logn in [
+            (data["z1"][spec_idx], data["logn1"][spec_idx]),
+            (data["z2"][spec_idx], data["logn2"][spec_idx]),
+        ]:
+            if not (np.isfinite(z) and np.isfinite(logn)):
+                continue
+            center = int(np.argmin(np.abs(wave - LYA_REST * (1.0 + float(z)))))
+            absorber_centers.append((center, float(logn)))
+            if float(logn) >= min_positive_log_nhi:
+                positive_centers.append((center, float(logn)))
+
+        neg_candidates: List[tuple[int, bool]] = []
+        for anchor in grid_centers:
+            if positive_centers:
+                distances = np.asarray([abs(anchor - c) for c, _ in positive_centers])
+                nearest = int(np.argmin(distances))
+                if distances[nearest] <= positive_radius_pix:
+                    c, logn = positive_centers[nearest]
+                    offset = (c - int(anchor)) / max(positive_radius_pix, 1)
+                    logn_norm = (float(logn) - LOGNHI_MIN) / (LOGNHI_MAX - LOGNHI_MIN)
+                    samples.append(WindowSample(spec_idx, int(anchor), 1, float(offset), float(logn_norm)))
+                    continue
+
+            hard = False
+            if absorber_centers:
+                min_dist_any = min(abs(int(anchor) - c) for c, _ in absorber_centers)
+                hard = min_dist_any <= hard_negative_radius_pix
+            neg_candidates.append((int(anchor), hard))
+
+        hard_negs = [anchor for anchor, hard in neg_candidates if hard]
+        easy_negs = [anchor for anchor, hard in neg_candidates if not hard]
+        rng.shuffle(hard_negs)
+        rng.shuffle(easy_negs)
+        n_hard = min(len(hard_negs), max_neg_per_spec // 2)
+        n_easy = max_neg_per_spec - n_hard
+        chosen_negs = hard_negs[:n_hard] + easy_negs[:n_easy]
+        for anchor in chosen_negs:
+            samples.append(WindowSample(spec_idx, int(anchor), 0, 0.0, 0.0))
+
+    return samples
+
+
 class WindowSpectraDataset(Dataset):
     def __init__(self,
                  data: Dict[str, np.ndarray],
@@ -251,8 +319,20 @@ def compute_window_loss(outputs: Dict[str, torch.Tensor],
     return {"loss": loss, "cls": cls.detach(), "off": off.detach(), "logn": logn.detach()}
 
 
-def merge_candidates(candidates: List[Dict[str, float]], min_separation_pix: int = 80) -> List[Dict[str, float]]:
-    candidates = sorted(candidates, key=lambda x: x["confidence"], reverse=True)
+def candidate_rank(cand: Dict[str, float], rank_by: str = "confidence") -> float:
+    if rank_by == "confidence":
+        return float(cand["confidence"])
+    if rank_by == "logn":
+        return float(cand["log_nhi"])
+    if rank_by == "conf_logn":
+        return float(cand["confidence"]) * max(float(cand["log_nhi"]) - 20.3, 0.0)
+    raise ValueError(f"Unknown rank_by={rank_by!r}")
+
+
+def merge_candidates(candidates: List[Dict[str, float]],
+                     min_separation_pix: int = 80,
+                     rank_by: str = "confidence") -> List[Dict[str, float]]:
+    candidates = sorted(candidates, key=lambda x: candidate_rank(x, rank_by), reverse=True)
     kept: List[Dict[str, float]] = []
     for cand in candidates:
         if all(abs(cand["center_pix"] - prev["center_pix"]) > min_separation_pix for prev in kept):

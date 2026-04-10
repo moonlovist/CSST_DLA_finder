@@ -14,6 +14,7 @@ from window_cnn import (
     LOGNHI_MAX,
     LOGNHI_MIN,
     WindowCnn,
+    candidate_rank,
     extract_window,
     load_test_arrays,
     merge_candidates,
@@ -32,6 +33,7 @@ def parse_args():
     p.add_argument("--top_k", type=int, default=8)
     p.add_argument("--batch_size", type=int, default=512)
     p.add_argument("--merge_separation_pix", type=int, default=80)
+    p.add_argument("--rank_by", choices=["confidence", "logn", "conf_logn"], default="confidence")
     return p.parse_args()
 
 
@@ -42,7 +44,7 @@ def pick_device(name: str):
 
 
 def infer_spectrum(model, wave, flux, z_qso, device, window_size, stride, threshold, top_k,
-                   batch_size, merge_separation_pix=80, offset_scale_pix=16):
+                   batch_size, merge_separation_pix=80, offset_scale_pix=16, rank_by="confidence"):
     half = window_size // 2
     candidates = []
     model.eval()
@@ -76,8 +78,8 @@ def infer_spectrum(model, wave, flux, z_qso, device, window_size, stride, thresh
                     "log_nhi": logn,
                     "confidence": conf,
                 })
-    merged = merge_candidates(candidates, min_separation_pix=merge_separation_pix)
-    merged = sorted(merged, key=lambda x: x["confidence"], reverse=True)[:top_k]
+    merged = merge_candidates(candidates, min_separation_pix=merge_separation_pix, rank_by=rank_by)
+    merged = sorted(merged, key=lambda x: candidate_rank(x, rank_by), reverse=True)[:top_k]
     merged.sort(key=lambda x: x["z_dla"])
     return merged
 
@@ -87,7 +89,7 @@ def main():
     device = pick_device(args.device)
     checkpoint = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
     train_args = checkpoint.get("args", {})
-    offset_scale_pix = int(train_args.get("jitter_pix", 16))
+    offset_scale_pix = int(train_args.get("positive_radius_pix", train_args.get("jitter_pix", 16)))
     model = WindowCnn().to(device)
     model.load_state_dict(checkpoint["model_state"])
     data = load_test_arrays(args.test_fits)
@@ -96,7 +98,7 @@ def main():
         cands = infer_spectrum(
             model, data["wave"], data["flux"][i], float(data["z_qso"][i]), device,
             args.window_size, args.stride, args.confidence_threshold, args.top_k, args.batch_size,
-            args.merge_separation_pix, offset_scale_pix,
+            args.merge_separation_pix, offset_scale_pix, args.rank_by,
         )
         if not cands:
             rows.append([i, int(data["targetid"][i]), float(data["z_qso"][i]), "", "", ""])

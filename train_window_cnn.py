@@ -17,6 +17,7 @@ from window_cnn import (
     LOGNHI_MIN,
     WindowCnn,
     WindowSpectraDataset,
+    build_sliding_window_samples,
     build_window_samples,
     compute_window_loss,
     load_train_arrays,
@@ -37,6 +38,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--min_positive_log_nhi", type=float, default=20.3)
     p.add_argument("--num_neg_per_spec", type=int, default=8)
     p.add_argument("--num_hard_neg_per_dla", type=int, default=6)
+    p.add_argument("--sample_mode", choices=["jitter", "sliding"], default="sliding")
+    p.add_argument("--stride", type=int, default=16)
+    p.add_argument("--positive_radius_pix", type=int, default=16)
+    p.add_argument("--max_neg_per_spec", type=int, default=32)
+    p.add_argument("--hard_negative_radius_pix", type=int, default=96)
     p.add_argument("--num_workers", type=int, default=4)
     p.add_argument("--seed", type=int, default=20251031)
     p.add_argument("--device", type=str, default="auto")
@@ -125,26 +131,50 @@ def main() -> None:
     val_idx = np.sort(idx[:n_val])
     train_idx = np.sort(idx[n_val:])
 
-    train_samples = build_window_samples(
-        data,
-        train_idx,
-        args.window_size,
-        num_neg_per_spec=args.num_neg_per_spec,
-        jitter_pix=args.jitter_pix,
-        min_positive_log_nhi=args.min_positive_log_nhi,
-        num_hard_neg_per_dla=args.num_hard_neg_per_dla,
-        seed=args.seed,
-    )
-    val_samples = build_window_samples(
-        data,
-        val_idx,
-        args.window_size,
-        num_neg_per_spec=args.num_neg_per_spec,
-        jitter_pix=args.jitter_pix,
-        min_positive_log_nhi=args.min_positive_log_nhi,
-        num_hard_neg_per_dla=args.num_hard_neg_per_dla,
-        seed=args.seed + 1,
-    )
+    if args.sample_mode == "sliding":
+        train_samples = build_sliding_window_samples(
+            data,
+            train_idx,
+            args.window_size,
+            stride=args.stride,
+            positive_radius_pix=args.positive_radius_pix,
+            min_positive_log_nhi=args.min_positive_log_nhi,
+            max_neg_per_spec=args.max_neg_per_spec,
+            hard_negative_radius_pix=args.hard_negative_radius_pix,
+            seed=args.seed,
+        )
+        val_samples = build_sliding_window_samples(
+            data,
+            val_idx,
+            args.window_size,
+            stride=args.stride,
+            positive_radius_pix=args.positive_radius_pix,
+            min_positive_log_nhi=args.min_positive_log_nhi,
+            max_neg_per_spec=args.max_neg_per_spec,
+            hard_negative_radius_pix=args.hard_negative_radius_pix,
+            seed=args.seed + 1,
+        )
+    else:
+        train_samples = build_window_samples(
+            data,
+            train_idx,
+            args.window_size,
+            num_neg_per_spec=args.num_neg_per_spec,
+            jitter_pix=args.jitter_pix,
+            min_positive_log_nhi=args.min_positive_log_nhi,
+            num_hard_neg_per_dla=args.num_hard_neg_per_dla,
+            seed=args.seed,
+        )
+        val_samples = build_window_samples(
+            data,
+            val_idx,
+            args.window_size,
+            num_neg_per_spec=args.num_neg_per_spec,
+            jitter_pix=args.jitter_pix,
+            min_positive_log_nhi=args.min_positive_log_nhi,
+            num_hard_neg_per_dla=args.num_hard_neg_per_dla,
+            seed=args.seed + 1,
+        )
 
     train_ds = WindowSpectraDataset(data, train_samples, args.window_size)
     val_ds = WindowSpectraDataset(data, val_samples, args.window_size)
