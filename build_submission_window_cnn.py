@@ -26,6 +26,7 @@ def parse_args():
     p.add_argument("--top_k", type=int, default=8)
     p.add_argument("--min_log_nhi", type=float, default=20.3)
     p.add_argument("--batch_size", type=int, default=512)
+    p.add_argument("--merge_separation_pix", type=int, default=80)
     return p.parse_args()
 
 
@@ -33,6 +34,8 @@ def main():
     args = parse_args()
     device = pick_device(args.device)
     checkpoint = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
+    train_args = checkpoint.get("args", {})
+    offset_scale_pix = int(train_args.get("jitter_pix", 16))
     model = WindowCnn().to(device)
     model.load_state_dict(checkpoint["model_state"])
     data = load_test_arrays(args.test_fits)
@@ -47,6 +50,7 @@ def main():
         cands = infer_spectrum(
             model, data["wave"], data["flux"][i], float(data["z_qso"][i]), device,
             args.window_size, args.stride, args.confidence_threshold, args.top_k, args.batch_size,
+            args.merge_separation_pix, offset_scale_pix,
         )
         for cand in cands:
             if cand["log_nhi"] < args.min_log_nhi:

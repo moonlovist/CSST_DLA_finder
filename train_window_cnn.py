@@ -33,6 +33,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--weight_decay", type=float, default=1e-4)
     p.add_argument("--val_frac", type=float, default=0.1)
     p.add_argument("--window_size", type=int, default=256)
+    p.add_argument("--jitter_pix", type=int, default=16)
+    p.add_argument("--min_positive_log_nhi", type=float, default=20.3)
+    p.add_argument("--num_neg_per_spec", type=int, default=8)
+    p.add_argument("--num_hard_neg_per_dla", type=int, default=6)
     p.add_argument("--num_workers", type=int, default=4)
     p.add_argument("--seed", type=int, default=20251031)
     p.add_argument("--device", type=str, default="auto")
@@ -121,8 +125,26 @@ def main() -> None:
     val_idx = np.sort(idx[:n_val])
     train_idx = np.sort(idx[n_val:])
 
-    train_samples = build_window_samples(data, train_idx, args.window_size, seed=args.seed)
-    val_samples = build_window_samples(data, val_idx, args.window_size, seed=args.seed + 1)
+    train_samples = build_window_samples(
+        data,
+        train_idx,
+        args.window_size,
+        num_neg_per_spec=args.num_neg_per_spec,
+        jitter_pix=args.jitter_pix,
+        min_positive_log_nhi=args.min_positive_log_nhi,
+        num_hard_neg_per_dla=args.num_hard_neg_per_dla,
+        seed=args.seed,
+    )
+    val_samples = build_window_samples(
+        data,
+        val_idx,
+        args.window_size,
+        num_neg_per_spec=args.num_neg_per_spec,
+        jitter_pix=args.jitter_pix,
+        min_positive_log_nhi=args.min_positive_log_nhi,
+        num_hard_neg_per_dla=args.num_hard_neg_per_dla,
+        seed=args.seed + 1,
+    )
 
     train_ds = WindowSpectraDataset(data, train_samples, args.window_size)
     val_ds = WindowSpectraDataset(data, val_samples, args.window_size)

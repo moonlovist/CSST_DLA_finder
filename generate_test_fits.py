@@ -39,6 +39,8 @@ generate_csst_dla_training.py
   FLUX       : 2D float32 [N_spec x N_pix]，含噪含 DLA
   FLUX_CLEAN : 2D float32 [N_spec x N_pix]，无噪（降分辨率+DLA）
   META       : BinTable — TARGETID, Z_QSO
+可选额外输出：
+  无
 
 用法
 ────
@@ -549,7 +551,6 @@ def main():
     for hdu in hdul:
         shape = getattr(hdu.data, 'shape', 'N/A') if hdu.data is not None else 'N/A'
         print(f"  [{hdu.name:12s}]  {str(shape)}")
-
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 本地调试：不需要 simqso 的 mock（仅测流程用）

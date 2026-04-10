@@ -112,7 +112,10 @@ def build_window_samples(data: Dict[str, np.ndarray],
                          indices: Sequence[int],
                          window_size: int,
                          num_neg_per_spec: int = 6,
-                         jitter_pix: int = 6,
+                         jitter_pix: int = 16,
+                         min_positive_log_nhi: float = 20.3,
+                         num_hard_neg_per_dla: int = 4,
+                         hard_neg_min_pix: int = 24,
                          seed: int = 20251031) -> List[WindowSample]:
     wave = data["wave"]
     rng = np.random.default_rng(seed)
@@ -122,18 +125,32 @@ def build_window_samples(data: Dict[str, np.ndarray],
     samples: List[WindowSample] = []
 
     for spec_idx in indices:
-        centers = dla_centers_pix(wave, data["z1"][spec_idx], data["z2"][spec_idx])
-        for j, c in enumerate(centers):
+        all_centers = []
+        for z, logn in [
+            (data["z1"][spec_idx], data["logn1"][spec_idx]),
+            (data["z2"][spec_idx], data["logn2"][spec_idx]),
+        ]:
+            if np.isfinite(z):
+                center = int(np.argmin(np.abs(wave - LYA_REST * (1.0 + float(z)))))
+                all_centers.append((center, float(logn)))
+
+        positive_centers = [(c, logn) for c, logn in all_centers if np.isfinite(logn) and logn >= min_positive_log_nhi]
+        for c, logn in positive_centers:
             for _ in range(3):
                 jitter = int(rng.integers(-jitter_pix, jitter_pix + 1))
                 anchor = int(np.clip(c + jitter, low, high))
                 offset = (c - anchor) / max(jitter_pix, 1)
-                logn = data["logn1"][spec_idx] if j == 0 else data["logn2"][spec_idx]
                 logn_norm = (float(logn) - LOGNHI_MIN) / (LOGNHI_MAX - LOGNHI_MIN)
                 samples.append(WindowSample(spec_idx, anchor, 1, float(offset), float(logn_norm)))
 
+            for sign in [-1, 1]:
+                for _ in range(max(num_hard_neg_per_dla // 2, 1)):
+                    dist = int(rng.integers(hard_neg_min_pix, window_size // 2 + 1))
+                    anchor = int(np.clip(c + sign * dist, low, high))
+                    samples.append(WindowSample(spec_idx, anchor, 0, 0.0, 0.0))
+
         forbidden = np.zeros(len(wave), dtype=bool)
-        for c in centers:
+        for c, _ in all_centers:
             lo = max(0, c - window_size // 2)
             hi = min(len(wave), c + window_size // 2)
             forbidden[lo:hi] = True
@@ -234,7 +251,7 @@ def compute_window_loss(outputs: Dict[str, torch.Tensor],
     return {"loss": loss, "cls": cls.detach(), "off": off.detach(), "logn": logn.detach()}
 
 
-def merge_candidates(candidates: List[Dict[str, float]], min_separation_pix: int = 20) -> List[Dict[str, float]]:
+def merge_candidates(candidates: List[Dict[str, float]], min_separation_pix: int = 80) -> List[Dict[str, float]]:
     candidates = sorted(candidates, key=lambda x: x["confidence"], reverse=True)
     kept: List[Dict[str, float]] = []
     for cand in candidates:

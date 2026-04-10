@@ -12,6 +12,7 @@ STRIDE="${STRIDE:-8}"
 WINDOW_SIZE="${WINDOW_SIZE:-256}"
 TOP_K="${TOP_K:-8}"
 BATCH_SIZE="${BATCH_SIZE:-512}"
+MERGE_SEPARATION_PIX="${MERGE_SEPARATION_PIX:-80}"
 
 mkdir -p "$(dirname "${OUTPUT_FITS}")"
 
@@ -23,5 +24,6 @@ python build_submission_window_cnn.py \
   --window_size "${WINDOW_SIZE}" \
   --top_k "${TOP_K}" \
   --batch_size "${BATCH_SIZE}" \
+  --merge_separation_pix "${MERGE_SEPARATION_PIX}" \
   --confidence_threshold "${CONFIDENCE_THRESHOLD}" \
   --min_log_nhi "${MIN_LOG_NHI}"
