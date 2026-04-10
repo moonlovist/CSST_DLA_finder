@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import shutil
 
 import numpy as np
 import torch
@@ -106,13 +105,14 @@ def main() -> None:
     if len(results) > 0:
         results.sort(["TARGETID", "Z_DLA"])
 
-    shutil.copy(args.test_fits, args.output_fits)
-    with fits.open(args.output_fits, mode="append") as hdul:
-        if "RESULTS" in hdul:
-            raise RuntimeError("Output FITS already contains a RESULTS extension.")
-        hdu = fits.BinTableHDU(results.as_array(), name="RESULTS")
-        hdu.header["COMMENT"] = "One row per predicted DLA absorber."
-        hdul.append(hdu)
+    with fits.open(args.test_fits, memmap=False) as hdul:
+        hdus = [hdu.copy() for hdu in hdul]
+    if any(hdu.name == "RESULTS" for hdu in hdus):
+        raise RuntimeError("Input test FITS already contains a RESULTS extension.")
+    hdu = fits.BinTableHDU(results.as_array(), name="RESULTS")
+    hdu.header["COMMENT"] = "One row per predicted DLA absorber."
+    hdus.append(hdu)
+    fits.HDUList(hdus).writeto(args.output_fits, overwrite=True)
 
     print(f"Wrote submission FITS to {args.output_fits}")
     print(f"Number of predicted DLAs: {len(results)}")
