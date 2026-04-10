@@ -33,7 +33,7 @@ def main() -> None:
     args = parse_args()
     device = pick_device(args.device)
 
-    checkpoint = torch.load(args.checkpoint, map_location="cpu")
+    checkpoint = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
     norm_stats = NormalizationStats(
         aux_mean=np.asarray(checkpoint["norm_stats"]["aux_mean"], dtype=np.float32),
         aux_std=np.asarray(checkpoint["norm_stats"]["aux_std"], dtype=np.float32),

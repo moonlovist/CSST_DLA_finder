@@ -151,7 +151,7 @@ def main() -> None:
         weight_decay=args.weight_decay,
     )
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
-    scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
+    scaler = torch.amp.GradScaler(device="cuda", enabled=use_amp)
 
     best_f1 = -1.0
     history = []
