@@ -27,7 +27,12 @@ def parse_args():
     p.add_argument("--min_log_nhi", type=float, default=20.3)
     p.add_argument("--batch_size", type=int, default=512)
     p.add_argument("--merge_separation_pix", type=int, default=80)
-    p.add_argument("--rank_by", choices=["confidence", "logn", "conf_logn"], default="confidence")
+    p.add_argument(
+        "--rank_by",
+        choices=["confidence", "logn", "conf_logn", "support", "conf_support", "mean_conf", "cluster_score"],
+        default="confidence",
+    )
+    p.add_argument("--min_support", type=float, default=1.0)
     return p.parse_args()
 
 
@@ -51,7 +56,7 @@ def main():
         cands = infer_spectrum(
             model, data["wave"], data["flux"][i], float(data["z_qso"][i]), device,
             args.window_size, args.stride, args.confidence_threshold, args.top_k, args.batch_size,
-            args.merge_separation_pix, offset_scale_pix, args.rank_by,
+            args.merge_separation_pix, offset_scale_pix, args.rank_by, args.min_support,
         )
         for cand in cands:
             if cand["log_nhi"] < args.min_log_nhi:

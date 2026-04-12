@@ -14,6 +14,7 @@ TOP_K="${TOP_K:-8}"
 BATCH_SIZE="${BATCH_SIZE:-512}"
 MERGE_SEPARATION_PIX="${MERGE_SEPARATION_PIX:-80}"
 RANK_BY="${RANK_BY:-confidence}"
+MIN_SUPPORT="${MIN_SUPPORT:-1}"
 
 mkdir -p "$(dirname "${OUTPUT_FITS}")"
 
@@ -27,5 +28,6 @@ python build_submission_window_cnn.py \
   --batch_size "${BATCH_SIZE}" \
   --merge_separation_pix "${MERGE_SEPARATION_PIX}" \
   --rank_by "${RANK_BY}" \
+  --min_support "${MIN_SUPPORT}" \
   --confidence_threshold "${CONFIDENCE_THRESHOLD}" \
   --min_log_nhi "${MIN_LOG_NHI}"

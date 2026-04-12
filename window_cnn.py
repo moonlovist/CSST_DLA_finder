@@ -326,16 +326,65 @@ def candidate_rank(cand: Dict[str, float], rank_by: str = "confidence") -> float
         return float(cand["log_nhi"])
     if rank_by == "conf_logn":
         return float(cand["confidence"]) * max(float(cand["log_nhi"]) - 20.3, 0.0)
+    if rank_by == "support":
+        return float(cand.get("support", 1.0))
+    if rank_by == "conf_support":
+        return float(cand["confidence"]) * float(cand.get("support", 1.0))
+    if rank_by == "mean_conf":
+        return float(cand.get("mean_conf", cand["confidence"]))
+    if rank_by == "cluster_score":
+        return (
+            float(cand["confidence"])
+            * np.sqrt(max(float(cand.get("support", 1.0)), 1.0))
+            * max(float(cand["log_nhi"]) - 20.3, 0.0)
+        )
     raise ValueError(f"Unknown rank_by={rank_by!r}")
 
 
 def merge_candidates(candidates: List[Dict[str, float]],
                      min_separation_pix: int = 80,
                      rank_by: str = "confidence") -> List[Dict[str, float]]:
-    candidates = sorted(candidates, key=lambda x: candidate_rank(x, rank_by), reverse=True)
-    kept: List[Dict[str, float]] = []
-    for cand in candidates:
-        if all(abs(cand["center_pix"] - prev["center_pix"]) > min_separation_pix for prev in kept):
-            kept.append(cand)
-    kept.sort(key=lambda x: x["center_pix"])
-    return kept
+    if not candidates:
+        return []
+
+    remaining = list(candidates)
+    clusters: List[List[Dict[str, float]]] = []
+    # Greedy peak clustering avoids chaining many low-threshold windows into a
+    # spectrum-scale cluster. Each cluster is local to its selected peak.
+    while remaining:
+        remaining.sort(key=lambda x: candidate_rank(x, rank_by), reverse=True)
+        peak = remaining[0]
+        peak_center = float(peak["center_pix"])
+        cluster = [
+            cand for cand in remaining
+            if abs(float(cand["center_pix"]) - peak_center) <= min_separation_pix
+        ]
+        clusters.append(cluster)
+        cluster_ids = {id(cand) for cand in cluster}
+        remaining = [cand for cand in remaining if id(cand) not in cluster_ids]
+
+    merged: List[Dict[str, float]] = []
+    for cluster in clusters:
+        conf = np.asarray([float(c["confidence"]) for c in cluster], dtype=np.float64)
+        weights = np.clip(conf, 1e-6, None)
+        centers = np.asarray([float(c["center_pix"]) for c in cluster], dtype=np.float64)
+        z_dlas = np.asarray([float(c["z_dla"]) for c in cluster], dtype=np.float64)
+        logns = np.asarray([float(c["log_nhi"]) for c in cluster], dtype=np.float64)
+        peak_idx = int(np.argmax(conf))
+        peak = cluster[peak_idx]
+        merged.append({
+            "center_pix": float(np.average(centers, weights=weights)),
+            "z_dla": float(np.average(z_dlas, weights=weights)),
+            "log_nhi": float(np.average(logns, weights=weights)),
+            "confidence": float(conf[peak_idx]),
+            "peak_center_pix": float(peak["center_pix"]),
+            "peak_z_dla": float(peak["z_dla"]),
+            "peak_log_nhi": float(peak["log_nhi"]),
+            "support": float(len(cluster)),
+            "mean_conf": float(np.mean(conf)),
+            "sum_conf": float(np.sum(conf)),
+            "width_pix": float(np.max(centers) - np.min(centers)) if len(cluster) > 1 else 0.0,
+        })
+
+    merged = sorted(merged, key=lambda x: candidate_rank(x, rank_by), reverse=True)
+    return merged

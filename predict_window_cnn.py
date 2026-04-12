@@ -33,7 +33,12 @@ def parse_args():
     p.add_argument("--top_k", type=int, default=8)
     p.add_argument("--batch_size", type=int, default=512)
     p.add_argument("--merge_separation_pix", type=int, default=80)
-    p.add_argument("--rank_by", choices=["confidence", "logn", "conf_logn"], default="confidence")
+    p.add_argument(
+        "--rank_by",
+        choices=["confidence", "logn", "conf_logn", "support", "conf_support", "mean_conf", "cluster_score"],
+        default="confidence",
+    )
+    p.add_argument("--min_support", type=float, default=1.0)
     return p.parse_args()
 
 
@@ -44,7 +49,8 @@ def pick_device(name: str):
 
 
 def infer_spectrum(model, wave, flux, z_qso, device, window_size, stride, threshold, top_k,
-                   batch_size, merge_separation_pix=80, offset_scale_pix=16, rank_by="confidence"):
+                   batch_size, merge_separation_pix=80, offset_scale_pix=16, rank_by="confidence",
+                   min_support=1.0):
     half = window_size // 2
     candidates = []
     model.eval()
@@ -79,6 +85,7 @@ def infer_spectrum(model, wave, flux, z_qso, device, window_size, stride, thresh
                     "confidence": conf,
                 })
     merged = merge_candidates(candidates, min_separation_pix=merge_separation_pix, rank_by=rank_by)
+    merged = [cand for cand in merged if float(cand.get("support", 1.0)) >= min_support]
     merged = sorted(merged, key=lambda x: candidate_rank(x, rank_by), reverse=True)[:top_k]
     merged.sort(key=lambda x: x["z_dla"])
     return merged
@@ -98,7 +105,7 @@ def main():
         cands = infer_spectrum(
             model, data["wave"], data["flux"][i], float(data["z_qso"][i]), device,
             args.window_size, args.stride, args.confidence_threshold, args.top_k, args.batch_size,
-            args.merge_separation_pix, offset_scale_pix, args.rank_by,
+            args.merge_separation_pix, offset_scale_pix, args.rank_by, args.min_support,
         )
         if not cands:
             rows.append([i, int(data["targetid"][i]), float(data["z_qso"][i]), "", "", ""])
@@ -111,10 +118,17 @@ def main():
                 float(cand["confidence"]),
                 float(cand["z_dla"]),
                 float(cand["log_nhi"]),
+                float(cand.get("support", 1.0)),
+                float(cand.get("mean_conf", cand["confidence"])),
+                float(cand.get("sum_conf", cand["confidence"])),
+                float(cand.get("width_pix", 0.0)),
             ])
     with open(args.output_csv, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
-        writer.writerow(["spec_id", "targetid", "z_qso", "confidence", "pred_z_dla", "pred_log_nhi"])
+        writer.writerow([
+            "spec_id", "targetid", "z_qso", "confidence", "pred_z_dla", "pred_log_nhi",
+            "support", "mean_conf", "sum_conf", "width_pix",
+        ])
         writer.writerows(rows)
     print(f"Wrote predictions to {args.output_csv}")
 

@@ -55,6 +55,7 @@ import os
 import sys
 import time
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 from astropy.io import fits
 from astropy.cosmology import Planck13
@@ -80,6 +81,9 @@ def parse_args():
                        "/global/cfs/cdirs/desi/users/tingtan/CSST_DLA/simqso/desisim/"))
     p.add_argument("--no_clean",    action="store_true",
                    help="Skip FLUX_CLEAN extension to save disk space")
+    p.add_argument("--n_workers",   type=int,
+                   default=int(os.environ.get("SLURM_CPUS_PER_TASK", "1")),
+                   help="Number of CPU threads for per-spectrum processing inside each batch")
     return p.parse_args()
 
 
@@ -188,7 +192,8 @@ def filter_like_pipeline(wave, flux,
                          lcut_gv=4100.0, lcut_gi=6200.0,
                          min_sigma=0.02,
                          snr_gu=1.0, snr_gv=2.0, snr_gi=3.0,
-                         rng=None):
+                         rng=None,
+                         noise_norms=None):
     """
     Step 1 — 分辨率退化（原始代码逐字）：
         sigma_pix = (8.0 * 3000.0) / (2.355 * 3600.0)  ~= 2.828 pix
@@ -224,18 +229,74 @@ def filter_like_pipeline(wave, flux,
     # ── Step 3 ───────────────────────────────────────────────────────────────
     noisy = f_norm.copy()
 
-    for mask, snr in [
+    for iband, (mask, snr) in enumerate([
         (wave < lcut_gv,                          snr_gu),
         ((wave >= lcut_gv) & (wave < lcut_gi),    snr_gv),
         (wave >= lcut_gi,                          snr_gi),
-    ]:
+    ]):
         if not np.any(mask):
             continue
         sig = np.sqrt(min_sigma**2 + (np.abs(f_norm[mask]) / snr)**2)
-        noisy[mask] = f_norm[mask] + rng.normal(0.0, sig, size=mask.sum())
+        if noise_norms is None:
+            noisy[mask] = f_norm[mask] + rng.normal(0.0, sig, size=mask.sum())
+        else:
+            noisy[mask] = f_norm[mask] + np.asarray(noise_norms[iband], dtype=np.float64) * sig
 
     # ── Step 4 ───────────────────────────────────────────────────────────────
     return (noisy * scale).astype(np.float32)
+
+
+def process_one_spectrum(payload):
+    """Process one spectrum after simqso generation.
+
+    The random numbers are pre-drawn by the parent process in the original serial
+    order, so threaded execution does not change the generated data for a fixed seed.
+    """
+    (gi, spec, wave, has_dla_i, n_dla_i, z_dla1_i, logNHI1_i, z_dla2_i, logNHI2_i,
+     ratio_gv_draw, ratio_gi_draw, noise_norms, no_clean, lcut_gv, lcut_gi,
+     min_sigma, f0, snr_gv_ratio, snr_gi_ratio, n_pix) = payload
+
+    gu_mask = wave < lcut_gv
+    f_gu_mean = float(np.mean(spec[gu_mask]))
+    if f_gu_mean > 0:
+        log_snr14 = -0.261 + 0.469 * np.log10(f_gu_mean / f0) + 0.4
+        snr14 = 10.0 ** log_snr14
+        snr_gu = snr14 * np.sqrt(8.0 / 14.0)
+    else:
+        snr_gu = 0.8
+    snr_gu = max(snr_gu, 0.05)
+
+    ratio_gv = snr_gv_ratio * (1.0 + ratio_gv_draw)
+    ratio_gi = snr_gi_ratio * (1.0 + ratio_gi_draw)
+    ratio_gv = max(ratio_gv, 1.5)
+    ratio_gi = max(ratio_gi, 1.5)
+    snr_gv = snr_gu * ratio_gv
+    snr_gi = snr_gv * ratio_gi
+
+    if has_dla_i:
+        dla_list = [(float(z_dla1_i), float(logNHI1_i))]
+        if n_dla_i == 2:
+            dla_list.append((float(z_dla2_i), float(logNHI2_i)))
+        trans = insert_dlas(wave, dla_list)
+    else:
+        trans = np.ones(n_pix, dtype=np.float64)
+
+    spec_dla = spec * trans
+    clean = None
+    if not no_clean:
+        spec_dla_clean = np.nan_to_num(
+            spec_dla.astype(np.float64),
+            nan=0.0, posinf=0.0, neginf=0.0)
+        clean = gaussian_filter1d(spec_dla_clean, sigma=_SIGMA_PIX).astype(np.float32)
+
+    noisy = filter_like_pipeline(
+        wave, spec_dla,
+        lcut_gv=lcut_gv, lcut_gi=lcut_gi,
+        min_sigma=min_sigma,
+        snr_gu=snr_gu, snr_gv=snr_gv, snr_gi=snr_gi,
+        noise_norms=noise_norms,
+    )
+    return gi, noisy, clean, np.float32(snr_gu), np.float32(snr_gv), np.float32(snr_gi)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -297,9 +358,13 @@ def generate_qso_batch(wave, z_qso_list, batch_idx=0, master_seed=20251031):
 
 def main():
     args = parse_args()
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(line_buffering=True)
 
     sys.path.insert(0, args.simqso_path)
+    print(f"Loading simqso from {args.simqso_path} ...", flush=True)
     from simqso import sqbase   # verify import early
+    print("simqso import OK", flush=True)
 
     os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)
 
@@ -337,6 +402,7 @@ def main():
     print(f"  SNR_GU     : from flux formula (Eq.9, scaled to 8A bins)")
     print(f"  SNR_GV     : SNR_GU x {SNR_GV_RATIO} (+/-{SNR_SCATTER*100:.0f}%)")
     print(f"  SNR_GI     : SNR_GV x {SNR_GI_RATIO} (+/-{SNR_SCATTER*100:.0f}%)")
+    print(f"  Workers    : {args.n_workers}")
     print(f"  Output     : {args.output}")
     print("=" * 52 + "\n")
 
@@ -419,63 +485,100 @@ def main():
             batch_idx=b, master_seed=args.seed,
         )   # [nb, N_PIX], float64
 
-        for j in range(nb):
-            gi   = i0 + j
-            spec = raw[j]   # float64
+        if args.n_workers <= 1:
+            # Exact original serial processing path. Use this when byte-for-byte
+            # reproducibility with the pre-parallel script is more important than speed.
+            for j in range(nb):
+                gi   = i0 + j
+                spec = raw[j]   # float64
 
-            # ── 由 GU band 平均 flux 计算三波段 SNR（公式 9）────────────────
-            # log10[SNR_14A] = -0.261 + 0.469 * log10(f / f0)，f0 = 1e-17
-            # 然后换算到 8A bin：SNR_8A = SNR_14A * sqrt(8/14)
-            # GV ≈ 2×GU，GI ≈ 1.5×GV，各有 SNR_SCATTER 相对散射
-            gu_mask   = wave < LCUT_GV
-            f_gu_mean = float(np.mean(spec[gu_mask]))
-            if f_gu_mean > 0:
-                log_snr14 = -0.261 + 0.469 * np.log10(f_gu_mean / F0) +0.4
-                snr14     = 10.0 ** log_snr14
-                snr_gu    = snr14 * np.sqrt(8.0 / 14.0)
-            else:
-                snr_gu = 0.8   # fallback for very faint/failed spectra
-            snr_gu = max(snr_gu, 0.05)   # 防止极端小值
+                # ── 由 GU band 平均 flux 计算三波段 SNR（公式 9）────────────────
+                # log10[SNR_14A] = -0.261 + 0.469 * log10(f / f0)，f0 = 1e-17
+                # 然后换算到 8A bin：SNR_8A = SNR_14A * sqrt(8/14)
+                # GV ≈ 2×GU，GI ≈ 1.5×GV，各有 SNR_SCATTER 相对散射
+                gu_mask   = wave < LCUT_GV
+                f_gu_mean = float(np.mean(spec[gu_mask]))
+                if f_gu_mean > 0:
+                    log_snr14 = -0.261 + 0.469 * np.log10(f_gu_mean / F0) +0.4
+                    snr14     = 10.0 ** log_snr14
+                    snr_gu    = snr14 * np.sqrt(8.0 / 14.0)
+                else:
+                    snr_gu = 0.8   # fallback for very faint/failed spectra
+                snr_gu = max(snr_gu, 0.05)   # 防止极端小值
 
-            ratio_gv  = SNR_GV_RATIO * (1.0 + rng.normal(0.0, SNR_SCATTER))
-            ratio_gi  = SNR_GI_RATIO * (1.0 + rng.normal(0.0, SNR_SCATTER))
-            ratio_gv  = max(ratio_gv, 1.5)
-            ratio_gi  = max(ratio_gi, 1.5)
-            snr_gv    = snr_gu * ratio_gv
-            snr_gi    = snr_gv * ratio_gi
+                ratio_gv  = SNR_GV_RATIO * (1.0 + rng.normal(0.0, SNR_SCATTER))
+                ratio_gi  = SNR_GI_RATIO * (1.0 + rng.normal(0.0, SNR_SCATTER))
+                ratio_gv  = max(ratio_gv, 1.5)
+                ratio_gi  = max(ratio_gi, 1.5)
+                snr_gv    = snr_gu * ratio_gv
+                snr_gi    = snr_gv * ratio_gi
 
-            snr_gu_arr[gi] = snr_gu
-            snr_gv_arr[gi] = snr_gv
-            snr_gi_arr[gi] = snr_gi
+                snr_gu_arr[gi] = snr_gu
+                snr_gv_arr[gi] = snr_gv
+                snr_gi_arr[gi] = snr_gi
 
-            # 插入 DLA（使用原始 dla_spec 接口）
-            if has_dla[gi]:
-                dla_list = [(float(z_dla1[gi]), float(logNHI1[gi]))]
-                if n_dla[gi] == 2:
-                    dla_list.append((float(z_dla2[gi]), float(logNHI2[gi])))
-                trans = insert_dlas(wave, dla_list)
-            else:
-                trans = np.ones(N_PIX, dtype=np.float64)
+                # 插入 DLA（使用原始 dla_spec 接口）
+                if has_dla[gi]:
+                    dla_list = [(float(z_dla1[gi]), float(logNHI1[gi]))]
+                    if n_dla[gi] == 2:
+                        dla_list.append((float(z_dla2[gi]), float(logNHI2[gi])))
+                    trans = insert_dlas(wave, dla_list)
+                else:
+                    trans = np.ones(N_PIX, dtype=np.float64)
 
-            spec_dla = spec * trans   # DLA 吸收后
+                spec_dla = spec * trans   # DLA 吸收后
 
-            # FLUX_CLEAN: 只降分辨率（无噪声）
-            if flux_clean is not None:
-                spec_dla_clean = np.nan_to_num(
-                    spec_dla.astype(np.float64),
-                    nan=0.0, posinf=0.0, neginf=0.0)
-                flux_clean[gi] = gaussian_filter1d(
-                    spec_dla_clean, sigma=_SIGMA_PIX
-                ).astype(np.float32)
+                # FLUX_CLEAN: 只降分辨率（无噪声）
+                if flux_clean is not None:
+                    spec_dla_clean = np.nan_to_num(
+                        spec_dla.astype(np.float64),
+                        nan=0.0, posinf=0.0, neginf=0.0)
+                    flux_clean[gi] = gaussian_filter1d(
+                        spec_dla_clean, sigma=_SIGMA_PIX
+                    ).astype(np.float32)
 
-            # FLUX: 降分辨率 + CSST 噪声（严格按原始 pipeline）
-            flux_noisy[gi] = filter_like_pipeline(
-                wave, spec_dla,
-                lcut_gv=LCUT_GV, lcut_gi=LCUT_GI,
-                min_sigma=MIN_SIGMA,
-                snr_gu=snr_gu, snr_gv=snr_gv, snr_gi=snr_gi,
-                rng=rng,
-            )
+                # FLUX: 降分辨率 + CSST 噪声（严格按原始 pipeline）
+                flux_noisy[gi] = filter_like_pipeline(
+                    wave, spec_dla,
+                    lcut_gv=LCUT_GV, lcut_gi=LCUT_GI,
+                    min_sigma=MIN_SIGMA,
+                    snr_gu=snr_gu, snr_gv=snr_gv, snr_gi=snr_gi,
+                    rng=rng,
+                )
+        else:
+            # Pre-draw all random variates in the same order as the original serial loop.
+            # This keeps the generated sample deterministic for a fixed seed even when the
+            # per-spectrum processing below is threaded.
+            band_masks = [
+                wave < LCUT_GV,
+                (wave >= LCUT_GV) & (wave < LCUT_GI),
+                wave >= LCUT_GI,
+            ]
+            payloads = []
+            for j in range(nb):
+                gi = i0 + j
+                ratio_gv_draw = rng.normal(0.0, SNR_SCATTER)
+                ratio_gi_draw = rng.normal(0.0, SNR_SCATTER)
+                noise_norms = [rng.normal(0.0, 1.0, size=mask.sum()) for mask in band_masks]
+                payloads.append((
+                    gi, raw[j], wave,
+                    int(has_dla[gi]), int(n_dla[gi]),
+                    z_dla1[gi], logNHI1[gi], z_dla2[gi], logNHI2[gi],
+                    ratio_gv_draw, ratio_gi_draw, noise_norms,
+                    args.no_clean, LCUT_GV, LCUT_GI, MIN_SIGMA,
+                    F0, SNR_GV_RATIO, SNR_GI_RATIO, N_PIX,
+                ))
+
+            with ThreadPoolExecutor(max_workers=args.n_workers) as pool:
+                results = list(pool.map(process_one_spectrum, payloads))
+
+            for gi, noisy, clean, snr_gu, snr_gv, snr_gi in results:
+                flux_noisy[gi] = noisy
+                if flux_clean is not None:
+                    flux_clean[gi] = clean
+                snr_gu_arr[gi] = snr_gu
+                snr_gv_arr[gi] = snr_gv
+                snr_gi_arr[gi] = snr_gi
 
         if not _tqdm:
             elapsed = time.time() - t_b
